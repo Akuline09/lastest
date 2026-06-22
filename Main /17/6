@@ -3,14 +3,18 @@ local RunService = game:GetService("RunService")
 local UIS        = game:GetService("UserInputService")
 local Camera     = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
+local Teams      = game:GetService("Teams")
 
+-- ============================================================
+-- GLOBAL VARS
+-- ============================================================
 getgenv().HeadSize         = 6
 getgenv().HeadTransparency = 0.5
 getgenv().HeadHitboxOn     = false
 getgenv().HeadTeamCheck    = false
 getgenv().HeadFriendOnly   = false
 
-getgenv().ESP_Outline = false   -- Highlight outline (see-through walls, outline only)
+getgenv().ESP_Outline = false
 getgenv().ESP_Tracer  = false
 getgenv().ESP_Info    = false
 getgenv().ESP_HP      = false
@@ -26,12 +30,48 @@ getgenv().TargetNPC       = false
 getgenv().NPCHostileOnly  = false
 getgenv().NPCFriendlyOnly = false
 
+-- ADVANCED TEAM CHECK (Head)
+getgenv().AdvTeamCheck_Enabled = false
+getgenv().AdvTeamCheck_Teams   = {}  -- { [TeamName] = true/false }
+
+-- ADVANCED TEAM CHECK (Aura)
+getgenv().AdvAuraTeamCheck_Enabled = false
+getgenv().AdvAuraTeamCheck_Teams   = {}  -- { [TeamName] = true/false }
+
 local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
 
 local npcCache  = {}
 local lastScan  = 0
 local SCAN_RATE = 2
 
+-- ============================================================
+-- TEAM SCANNING
+-- ============================================================
+local function getAllTeamNames()
+    local names = {}
+    for _, team in ipairs(Teams:GetTeams()) do
+        table.insert(names, team.Name)
+    end
+    return names
+end
+
+local function refreshTeamList()
+    local names = getAllTeamNames()
+    -- Khởi tạo default cho team mới
+    for _, name in ipairs(names) do
+        if getgenv().AdvTeamCheck_Teams[name] == nil then
+            getgenv().AdvTeamCheck_Teams[name] = true  -- default: bật = bị dính headsize
+        end
+        if getgenv().AdvAuraTeamCheck_Teams[name] == nil then
+            getgenv().AdvAuraTeamCheck_Teams[name] = true
+        end
+    end
+    return names
+end
+
+-- ============================================================
+-- NPC
+-- ============================================================
 local function refreshNPCs()
     npcCache = {}
     for _, obj in ipairs(workspace:GetDescendants()) do
@@ -82,14 +122,14 @@ local function getNPCAlign(model)
 end
 
 local function shouldTargetNPC(model)
-    if not TargetNPC then return false end
+    if not getgenv().TargetNPC then return false end
     if not model or not model.Parent then return false end
     local hum = model:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return false end
-    if NPCHostileOnly or NPCFriendlyOnly then
+    if getgenv().NPCHostileOnly or getgenv().NPCFriendlyOnly then
         local align = getNPCAlign(model)
-        if NPCHostileOnly  and align ~= "hostile"  then return false end
-        if NPCFriendlyOnly and align ~= "friendly" then return false end
+        if getgenv().NPCHostileOnly  and align ~= "hostile"  then return false end
+        if getgenv().NPCFriendlyOnly and align ~= "friendly" then return false end
     end
     return true
 end
@@ -101,18 +141,52 @@ local function getNPCColor(model)
     return Color3.fromRGB(255, 160, 0)
 end
 
+-- ============================================================
+-- TARGET LOGIC (HEAD)
+-- ============================================================
 local function shouldTarget(v)
     if v == LocalPlayer then return false end
-    if not TargetPlayers then return false end
-    if HeadTeamCheck  and LocalPlayer.Team == v.Team then return false end
-    if HeadFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
+    if not getgenv().TargetPlayers then return false end
+
+    -- Advanced Team Check (ưu tiên)
+    if getgenv().AdvTeamCheck_Enabled then
+        if v.Team then
+            local teamName = v.Team.Name
+            -- Nếu team được BẬT trong advanced -> BỊ DÍNH headsize (return true)
+            -- Nếu team được TẮT trong advanced -> KHÔNG bị dính (return false)
+            return getgenv().AdvTeamCheck_Teams[teamName] == true
+        end
+        return true  -- Không có team -> mặc định bị dính
+    end
+
+    -- Team Check cũ
+    if getgenv().HeadTeamCheck and LocalPlayer.Team == v.Team then return false end
+
+    -- Friend Check
+    if getgenv().HeadFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
     return true
 end
 
+-- ============================================================
+-- TARGET LOGIC (AURA)
+-- ============================================================
 local function auraTarget(v)
     if v == LocalPlayer then return false end
-    if AuraTeamCheck  and LocalPlayer.Team == v.Team then return false end
-    if AuraFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
+
+    -- Advanced Team Check (Aura)
+    if getgenv().AdvAuraTeamCheck_Enabled then
+        if v.Team then
+            local teamName = v.Team.Name
+            return getgenv().AdvAuraTeamCheck_Teams[teamName] == true
+        end
+        return true
+    end
+
+    -- Team Check cũ
+    if getgenv().AuraTeamCheck and LocalPlayer.Team == v.Team then return false end
+
+    -- Friend Check
+    if getgenv().AuraFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
     return true
 end
 
@@ -121,14 +195,17 @@ local function getTeamColor(v)
     return Color3.fromRGB(255, 50, 50)
 end
 
+-- ============================================================
+-- APPLY HEADS
+-- ============================================================
 local function applyHeads()
     for _, v in ipairs(Players:GetPlayers()) do
         if v == LocalPlayer or not v.Character then continue end
         local head = v.Character:FindFirstChild("Head")
         if not head then continue end
-        if HeadHitboxOn and shouldTarget(v) then
-            head.Size = Vector3.new(HeadSize, HeadSize, HeadSize)
-            head.Transparency = HeadTransparency
+        if getgenv().HeadHitboxOn and shouldTarget(v) then
+            head.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+            head.Transparency = getgenv().HeadTransparency
             head.Massless = true; head.CanCollide = false
         else
             head.Size = Vector3.new(2, 1, 1)
@@ -139,9 +216,9 @@ local function applyHeads()
         if not model or not model.Parent then continue end
         local head = model:FindFirstChild("Head")
         if not head then continue end
-        if HeadHitboxOn and shouldTargetNPC(model) then
-            head.Size = Vector3.new(HeadSize, HeadSize, HeadSize)
-            head.Transparency = HeadTransparency
+        if getgenv().HeadHitboxOn and shouldTargetNPC(model) then
+            head.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+            head.Transparency = getgenv().HeadTransparency
             head.Massless = true; head.CanCollide = false
         else
             head.Size = Vector3.new(2, 1, 1)
@@ -155,20 +232,23 @@ RunService.RenderStepped:Connect(function()
     if tick() - lastScan >= SCAN_RATE then refreshNPCs(); lastScan = tick() end
 end)
 
+-- ============================================================
+-- AURA
+-- ============================================================
 RunService.RenderStepped:Connect(function()
-    if not AuraOn then return end
+    if not getgenv().AuraOn then return end
     local chr = LocalPlayer.Character; if not chr then return end
     local inRange = false
 
     for _, v in ipairs(Players:GetPlayers()) do
         if not auraTarget(v) then continue end
         local vc = v.Character; if not vc then continue end
-        local hum = vc:FindFirstChild("Humanoid")
+        local hum = vc:FindFirstChildOfClass("Humanoid")
         local hrp = vc:FindFirstChild("HumanoidRootPart")
         if not hum or not hrp or hum.Health <= 0 then continue end
-        if LocalPlayer:DistanceFromCharacter(hrp.Position) <= AuraRange then
+        if LocalPlayer:DistanceFromCharacter(hrp.Position) <= getgenv().AuraRange then
             inRange = true
-            if AuraMode == "tool" then
+            if getgenv().AuraMode == "tool" then
                 local tool = chr:FindFirstChildOfClass("Tool")
                 if tool and tool:FindFirstChild("Handle") then
                     tool:Activate()
@@ -183,13 +263,13 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    if TargetNPC then
+    if getgenv().TargetNPC then
         for _, model in ipairs(npcCache) do
             if not shouldTargetNPC(model) then continue end
             local hrp = model:FindFirstChild("HumanoidRootPart")
-            if hrp and LocalPlayer:DistanceFromCharacter(hrp.Position) <= AuraRange then
+            if hrp and LocalPlayer:DistanceFromCharacter(hrp.Position) <= getgenv().AuraRange then
                 inRange = true
-                if AuraMode == "tool" then
+                if getgenv().AuraMode == "tool" then
                     local tool = chr:FindFirstChildOfClass("Tool")
                     if tool and tool:FindFirstChild("Handle") then
                         tool:Activate()
@@ -205,7 +285,7 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    if AuraMode == "m1" and inRange then
+    if getgenv().AuraMode == "m1" and inRange then
         local tool = chr:FindFirstChildOfClass("Tool")
         if isMobile then
             if tool then pcall(function() tool:Activate() end) end
@@ -215,7 +295,9 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- ============================================================
 -- ESP
+-- ============================================================
 local espData = {}
 
 local function clearESP(key)
@@ -260,13 +342,12 @@ local function drawESP(key, model, col, nameStr, dist)
     if not espData[key] then espData[key] = {} end
     local d = espData[key]
 
-    -- Outline ESP: Highlight instance, outline only, see-through walls
-    if ESP_Outline then
+    if getgenv().ESP_Outline then
         if not d.hl then
             local hl = Instance.new("Highlight")
-            hl.FillTransparency    = 1      -- no fill
-            hl.OutlineTransparency = 0      -- full outline
-            hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop  -- see through walls
+            hl.FillTransparency    = 1
+            hl.OutlineTransparency = 0
+            hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
             hl.Parent              = workspace
             d.hl = hl
         end
@@ -290,14 +371,13 @@ local function drawESP(key, model, col, nameStr, dist)
     local y1  = top.Y
     local y2  = bot.Y
 
-    if ESP_Tracer then
+    if getgenv().ESP_Tracer then
         if not d.tr then d.tr = newLine(col) end
         d.tr.Color = col; d.tr.From = tb; d.tr.To = Vector2.new(cx, y2); d.tr.Visible = true
     elseif d.tr then d.tr.Visible = false end
 
-    -- Name + Distance
     local infoY = y1 - 16
-    if ESP_Info then
+    if getgenv().ESP_Info then
         if not d.nm then d.nm = newText(col) end
         if not d.di then d.di = newText(Color3.new(1, 1, 1)) end
         d.nm.Color = col; d.nm.Text = nameStr
@@ -309,8 +389,7 @@ local function drawESP(key, model, col, nameStr, dist)
         if d.di then d.di.Visible = false end
     end
 
-    -- HP as number + %
-    if ESP_HP then
+    if getgenv().ESP_HP then
         local hum   = model:FindFirstChildOfClass("Humanoid")
         local hp    = hum and math.floor(hum.Health)    or 0
         local maxHp = hum and math.max(math.floor(hum.MaxHealth), 1) or 100
@@ -321,18 +400,18 @@ local function drawESP(key, model, col, nameStr, dist)
         if not d.hpt then d.hpt = newText(hpCol) end
         d.hpt.Color    = hpCol
         d.hpt.Text     = hp .. " HP (" .. pct .. "%)"
-        local hpY = ESP_Info and (infoY + 26) or (infoY + 13)
+        local hpY = getgenv().ESP_Info and (infoY + 26) or (infoY + 13)
         d.hpt.Position = Vector2.new(cx, hpY); d.hpt.Visible = true
     elseif d.hpt then d.hpt.Visible = false end
 end
 
 RunService.RenderStepped:Connect(function()
-    local anyOn = ESP_Outline or ESP_Tracer or ESP_Info or ESP_HP
+    local anyOn = getgenv().ESP_Outline or getgenv().ESP_Tracer or getgenv().ESP_Info or getgenv().ESP_HP
     if not anyOn then clearAll(); return end
 
     local lhrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
-    if TargetPlayers then
+    if getgenv().TargetPlayers then
         for _, v in ipairs(Players:GetPlayers()) do
             if not shouldTarget(v) then clearESP(v); continue end
             local chr = v.Character; if not chr then clearESP(v); continue end
@@ -342,7 +421,7 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    if TargetNPC then
+    if getgenv().TargetNPC then
         local active = {}
         for _, model in ipairs(npcCache) do
             if not shouldTargetNPC(model) then clearESP(model); continue end
@@ -365,7 +444,9 @@ end)
 
 Players.PlayerRemoving:Connect(clearESP)
 
--- Sync helpers
+-- ============================================================
+-- SYNC HELPERS
+-- ============================================================
 local function syncQuickBtn(state)
     if not QuickBtn then return end
     QuickBtn.Text = state and "HEAD\nON" or "HEAD\nOFF"
@@ -385,9 +466,7 @@ local function setAura(state)
 end
 
 -- ============================================================
--- RAYFIELD  (global — accessible from all closures above)
--- FIX: No 'local' here so Rayfield is global and reachable by
---      setHitbox / setAura regardless of declaration order.
+-- RAYFIELD UI
 -- ============================================================
 Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
@@ -447,8 +526,65 @@ TabHitbox:CreateToggle({ Name="Head Hitbox", CurrentValue=false, Flag="HHit",
     Callback=function(s) getgenv().HeadHitboxOn=s; syncQuickBtn(s) end })
 
 TabHitbox:CreateSection("Filters")
-TabHitbox:CreateToggle({ Name="Team Check",   CurrentValue=false, Flag="HTC", Callback=function(v) getgenv().HeadTeamCheck=v end })
-TabHitbox:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="HFC", Callback=function(v) getgenv().HeadFriendOnly=v end })
+
+-- Team Check cũ
+local HTC_Toggle
+HTC_Toggle = TabHitbox:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="HTC",
+    Callback=function(v)
+        getgenv().HeadTeamCheck = v
+        -- Tắt Advanced nếu bật Team Check cũ
+        if v and getgenv().AdvTeamCheck_Enabled then
+            getgenv().AdvTeamCheck_Enabled = false
+            pcall(function() Rayfield.Flags.AdvTeam:Set(false) end)
+        end
+    end })
+
+TabHitbox:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="HFC",
+    Callback=function(v) getgenv().HeadFriendOnly=v end })
+
+-- ── ADVANCED TEAM CHECK (HEAD) ──────────────────────────────
+TabHitbox:CreateSection("Advanced Team Check")
+
+TabHitbox:CreateParagraph({ Title="How it works",
+    Content="ON = team được chọn sẽ BỊ DÍNH headsize\nOFF = team được chọn KHÔNG bị dính\nKhi bật Advanced, Team Check cũ sẽ tự tắt" })
+
+local AdvTeamToggle
+AdvTeamToggle = TabHitbox:CreateToggle({ Name="Enable Advanced Team Check", CurrentValue=false, Flag="AdvTeam",
+    Callback=function(v)
+        getgenv().AdvTeamCheck_Enabled = v
+        -- Tắt Team Check cũ khi bật Advanced
+        if v and getgenv().HeadTeamCheck then
+            getgenv().HeadTeamCheck = false
+            pcall(function() Rayfield.Flags.HTC:Set(false) end)
+        end
+        -- Refresh team list
+        if v then refreshTeamList() end
+    end })
+
+-- Tạo toggle cho từng team (dynamic)
+local AdvTeamToggles = {}
+local function createAdvTeamToggles()
+    local teamNames = refreshTeamList()
+    -- Xóa toggle cũ nếu có (không thể xóa trong Rayfield nên ta chỉ tạo mới)
+    for _, name in ipairs(teamNames) do
+        local flagName = "AdvTeam_" .. name:gsub(" ", "_")
+        local defaultVal = getgenv().AdvTeamCheck_Teams[name]
+        if defaultVal == nil then defaultVal = true end
+
+        local tgl = TabHitbox:CreateToggle({
+            Name = "[HEAD] " .. name,
+            CurrentValue = defaultVal,
+            Flag = flagName,
+            Callback = function(val)
+                getgenv().AdvTeamCheck_Teams[name] = val
+            end
+        })
+        table.insert(AdvTeamToggles, tgl)
+    end
+end
+
+-- Delay tạo toggle team để đảm bảo Rayfield đã load xong
+task.delay(0.5, createAdvTeamToggles)
 
 -- ── ESP ───────────────────────────────────────────────────────
 local TabESP = Window:CreateTab("ESP", 4483362458)
@@ -477,8 +613,58 @@ TabAura:CreateToggle({ Name="Enable Aura", CurrentValue=false, Flag="AOn",
     Callback=function(v) getgenv().AuraOn=v end })
 
 TabAura:CreateSection("Filters")
-TabAura:CreateToggle({ Name="Team Check",   CurrentValue=false, Flag="ATC", Callback=function(v) getgenv().AuraTeamCheck=v end })
-TabAura:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="AFC", Callback=function(v) getgenv().AuraFriendOnly=v end })
+
+-- Aura Team Check cũ
+TabAura:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="ATC",
+    Callback=function(v)
+        getgenv().AuraTeamCheck = v
+        if v and getgenv().AdvAuraTeamCheck_Enabled then
+            getgenv().AdvAuraTeamCheck_Enabled = false
+            pcall(function() Rayfield.Flags.AdvAuraTeam:Set(false) end)
+        end
+    end })
+
+TabAura:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="AFC",
+    Callback=function(v) getgenv().AuraFriendOnly=v end })
+
+-- ── ADVANCED TEAM CHECK (AURA) ──────────────────────────────
+TabAura:CreateSection("Advanced Team Check (Aura)")
+
+TabAura:CreateParagraph({ Title="How it works",
+    Content="ON = team được chọn sẽ BỊ DÍNH aura\nOFF = team được chọn KHÔNG bị dính\nKhi bật Advanced, Team Check cũ sẽ tự tắt" })
+
+TabAura:CreateToggle({ Name="Enable Advanced Aura Team Check", CurrentValue=false, Flag="AdvAuraTeam",
+    Callback=function(v)
+        getgenv().AdvAuraTeamCheck_Enabled = v
+        if v and getgenv().AuraTeamCheck then
+            getgenv().AuraTeamCheck = false
+            pcall(function() Rayfield.Flags.ATC:Set(false) end)
+        end
+        if v then refreshTeamList() end
+    end })
+
+-- Tạo toggle cho từng team (Aura)
+local AdvAuraTeamToggles = {}
+local function createAdvAuraTeamToggles()
+    local teamNames = refreshTeamList()
+    for _, name in ipairs(teamNames) do
+        local flagName = "AdvAuraTeam_" .. name:gsub(" ", "_")
+        local defaultVal = getgenv().AdvAuraTeamCheck_Teams[name]
+        if defaultVal == nil then defaultVal = true end
+
+        local tgl = TabAura:CreateToggle({
+            Name = "[AURA] " .. name,
+            CurrentValue = defaultVal,
+            Flag = flagName,
+            Callback = function(val)
+                getgenv().AdvAuraTeamCheck_Teams[name] = val
+            end
+        })
+        table.insert(AdvAuraTeamToggles, tgl)
+    end
+end
+
+task.delay(0.5, createAdvAuraTeamToggles)
 
 -- ── SETTINGS ─────────────────────────────────────────────────
 local TabSettings = Window:CreateTab("Settings", 4483362458)
@@ -500,27 +686,23 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- Keybinds
--- FIX: Callback is what Rayfield calls when the bound key is PRESSED in game.
---      The user changes which key triggers this Callback via the keybind UI element.
---      No UIS.InputBegan needed — Rayfield handles key detection internally.
 TabSettings:CreateSection("Keybinds  (click element to rebind)")
 
 TabSettings:CreateKeybind({ Name="Toggle Head Hitbox", CurrentKeybind="F",
     HoldToInteract=false, Flag="KB_Hit",
     Callback=function()
-        setHitbox(not HeadHitboxOn)
+        setHitbox(not getgenv().HeadHitboxOn)
     end })
 
 TabSettings:CreateKeybind({ Name="Toggle Aura", CurrentKeybind="G",
     HoldToInteract=false, Flag="KB_Aura",
     Callback=function()
-        setAura(not AuraOn)
+        setAura(not getgenv().AuraOn)
     end })
 
-TabSettings:CreateKeybind({ Name="Open / Close GUI", CurrentKeybind="RightControl",
+TabSettings:CreateKeybind({ Name="Open / Close GUI", CurrentKeybind="Insert",
     HoldToInteract=false, Flag="KB_GUI",
     Callback=function()
-        -- Rayfield fires this even when UI is hidden, so toggling works either direction
         pcall(function() Rayfield:ToggleUI() end)
     end })
 
@@ -529,13 +711,13 @@ TabSettings:CreateToggle({ Name="Show Quick Toggle Button", CurrentValue=false, 
     Callback=function(v) if QuickGui then QuickGui.Enabled=v end end })
 
 -- ============================================================
--- QUICK TOGGLE BUTTON  (default HIDDEN — enable in Settings)
+-- QUICK TOGGLE BUTTON
 -- ============================================================
 QuickGui = Instance.new("ScreenGui")
 QuickGui.Name           = "QuickToggle_op1"
 QuickGui.ResetOnSpawn   = false
 QuickGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-QuickGui.Enabled        = false   -- DEFAULT HIDDEN
+QuickGui.Enabled        = false
 QuickGui.Parent         = game.CoreGui
 
 QuickBtn = Instance.new("TextButton")
@@ -556,9 +738,9 @@ local qs = Instance.new("UIStroke", QuickBtn)
 qs.Color = Color3.fromRGB(0, 200, 255); qs.Thickness = 2
 
 QuickBtn.MouseButton1Click:Connect(function()
-    setHitbox(not HeadHitboxOn)
+    setHitbox(not getgenv().HeadHitboxOn)
 end)
 
 task.delay(2, function()
-    Rayfield:Notify({ Title="Aholo oper1", Content="remake by : Aholo", Duration=4 })
+    Rayfield:Notify({ Title="Aholo oper1", Content="remake by : Aholo | Advanced Team Check Added", Duration=4 })
 end)
