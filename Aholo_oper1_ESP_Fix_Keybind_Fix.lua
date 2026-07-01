@@ -38,12 +38,10 @@ getgenv().AdvTeamCheck_Teams   = {}
 getgenv().AdvAuraTeamCheck_Enabled = false
 getgenv().AdvAuraTeamCheck_Teams   = {}
 
--- KEYBIND MANAGER
-getgenv().Keybinds = {
-    Hitbox = "F",
-    Aura   = "G",
-    GUI    = "Insert"
-}
+-- KEYBIND VARS (tự quản lý để tránh duplicate)
+getgenv().KB_Hitbox_Key  = "F"
+getgenv().KB_Aura_Key    = "G"
+getgenv().KB_GUI_Key     = "Insert"
 
 local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
 
@@ -153,6 +151,7 @@ end
 local function shouldTarget(v)
     if v == LocalPlayer then return false end
     if not getgenv().TargetPlayers then return false end
+
     if getgenv().AdvTeamCheck_Enabled then
         if v.Team then
             local teamName = v.Team.Name
@@ -160,6 +159,7 @@ local function shouldTarget(v)
         end
         return true
     end
+
     if getgenv().HeadTeamCheck and LocalPlayer.Team == v.Team then return false end
     if getgenv().HeadFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
     return true
@@ -170,6 +170,7 @@ end
 -- ============================================================
 local function auraTarget(v)
     if v == LocalPlayer then return false end
+
     if getgenv().AdvAuraTeamCheck_Enabled then
         if v.Team then
             local teamName = v.Team.Name
@@ -177,6 +178,7 @@ local function auraTarget(v)
         end
         return true
     end
+
     if getgenv().AuraTeamCheck and LocalPlayer.Team == v.Team then return false end
     if getgenv().AuraFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
     return true
@@ -330,26 +332,21 @@ local function getBounds(model)
     return top, bot
 end
 
--- FIX #1: Kiểm tra player chết và xóa ESP hoàn toàn
-local function isPlayerDead(v)
-    if typeof(v) ~= "Instance" or not v:IsA("Player") then return false end
+-- FIX: Hàm kiểm tra player còn sống và hợp lệ không
+local function isPlayerValidForESP(v)
+    if not v or v == LocalPlayer then return false end
     local chr = v.Character
-    if not chr then return true end
+    if not chr then return false end
     local hum = chr:FindFirstChildOfClass("Humanoid")
-    if not hum then return true end
-    if hum.Health <= 0 then return true end
-    return false
+    local hrp = chr:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp then return false end
+    if hum.Health <= 0 then return false end
+    return true
 end
 
 local function drawESP(key, model, col, nameStr, dist)
     if not espData[key] then espData[key] = {} end
     local d = espData[key]
-
-    -- FIX: Nếu là Player và đã chết → xóa ESP hoàn toàn
-    if typeof(key) == "Instance" and key:IsA("Player") and isPlayerDead(key) then
-        clearESP(key)
-        return
-    end
 
     if getgenv().ESP_Outline then
         if not d.hl then
@@ -368,8 +365,10 @@ local function drawESP(key, model, col, nameStr, dist)
 
     local top, bot = getBounds(model)
     if not top then
-        -- FIX: Xóa hoàn toàn ESP khi không lấy được bounds (chết/respawn)
-        clearESP(key)
+        -- FIX: Khi không có bounds (chết/mất), xóa TẤT CẢ ESP cho key này
+        for _, k in pairs({"tr","nm","di","hpt"}) do
+            if d[k] then pcall(function() d[k]:Remove() end); d[k] = nil end
+        end
         return
     end
 
@@ -421,9 +420,15 @@ RunService.RenderStepped:Connect(function()
 
     if getgenv().TargetPlayers then
         for _, v in ipairs(Players:GetPlayers()) do
+            -- FIX: Kiểm tra player còn sống không trước khi vẽ ESP
+            if not isPlayerValidForESP(v) then
+                clearESP(v)  -- Xóa ESP nếu chết/mất character
+                continue
+            end
             if not shouldTarget(v) then clearESP(v); continue end
-            local chr = v.Character; if not chr then clearESP(v); continue end
-            local hrp = chr:FindFirstChild("HumanoidRootPart"); if not hrp then clearESP(v); continue end
+            local chr = v.Character
+            local hrp = chr:FindFirstChild("HumanoidRootPart")
+            if not hrp then clearESP(v); continue end
             local dist = lhrp and math.floor((lhrp.Position - hrp.Position).Magnitude) or 0
             drawESP(v, chr, getTeamColor(v), v.DisplayName, dist)
         end
@@ -445,10 +450,14 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- FIX: Xóa ESP của player đã leave
+    -- FIX: Xóa ESP cho player đã thoát game hoặc không còn trong game
     for k in pairs(espData) do
-        if typeof(k) == "Instance" and k:IsA("Player") and not k.Parent then
-            clearESP(k)
+        if typeof(k) == "Instance" and k:IsA("Player") then
+            if not k.Parent then
+                clearESP(k)
+            elseif not isPlayerValidForESP(k) then
+                clearESP(k)
+            end
         end
     end
 end)
@@ -538,7 +547,8 @@ TabHitbox:CreateToggle({ Name="Head Hitbox", CurrentValue=false, Flag="HHit",
 
 TabHitbox:CreateSection("Filters")
 
-TabHitbox:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="HTC",
+local HTC_Toggle
+HTC_Toggle = TabHitbox:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="HTC",
     Callback=function(v)
         getgenv().HeadTeamCheck = v
         if v and getgenv().AdvTeamCheck_Enabled then
@@ -556,7 +566,8 @@ TabHitbox:CreateSection("Advanced Team Check")
 TabHitbox:CreateParagraph({ Title="How it works",
     Content="ON = team được chọn sẽ BỊ DÍNH headsize\nOFF = team được chọn KHÔNG bị dính\nKhi bật Advanced, Team Check cũ sẽ tự tắt" })
 
-TabHitbox:CreateToggle({ Name="Enable Advanced Team Check", CurrentValue=false, Flag="AdvTeam",
+local AdvTeamToggle
+AdvTeamToggle = TabHitbox:CreateToggle({ Name="Enable Advanced Team Check", CurrentValue=false, Flag="AdvTeam",
     Callback=function(v)
         getgenv().AdvTeamCheck_Enabled = v
         if v and getgenv().HeadTeamCheck then
@@ -573,6 +584,7 @@ local function createAdvTeamToggles()
         local flagName = "AdvTeam_" .. name:gsub(" ", "_")
         local defaultVal = getgenv().AdvTeamCheck_Teams[name]
         if defaultVal == nil then defaultVal = true end
+
         local tgl = TabHitbox:CreateToggle({
             Name = "[HEAD] " .. name,
             CurrentValue = defaultVal,
@@ -584,6 +596,7 @@ local function createAdvTeamToggles()
         table.insert(AdvTeamToggles, tgl)
     end
 end
+
 task.delay(0.5, createAdvTeamToggles)
 
 -- ── ESP ───────────────────────────────────────────────────────
@@ -649,6 +662,7 @@ local function createAdvAuraTeamToggles()
         local flagName = "AdvAuraTeam_" .. name:gsub(" ", "_")
         local defaultVal = getgenv().AdvAuraTeamCheck_Teams[name]
         if defaultVal == nil then defaultVal = true end
+
         local tgl = TabAura:CreateToggle({
             Name = "[AURA] " .. name,
             CurrentValue = defaultVal,
@@ -660,6 +674,7 @@ local function createAdvAuraTeamToggles()
         table.insert(AdvAuraTeamToggles, tgl)
     end
 end
+
 task.delay(0.5, createAdvAuraTeamToggles)
 
 -- ── SETTINGS ─────────────────────────────────────────────────
@@ -682,102 +697,124 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ============================================================
--- KEYBIND MANAGER (FIX #2: Tự quản lý, không dùng Rayfield keybind)
+-- KEYBIND SYSTEM (TỰ QUẢN LÝ - FIX DUPLICATE)
 -- ============================================================
-TabSettings:CreateSection("Keybinds")
+-- Thay vì dùng Rayfield CreateKeybind (bị duplicate), ta dùng UIS.InputBegan
+-- và chỉ dùng Rayfield để hiển thị key hiện tại + cho phép đổi key
 
--- Lưu trữ InputBegan connections để có thể disconnect
-local KeybindConnections = {}
+TabSettings:CreateSection("Keybinds  (click to rebind)")
 
-local function disconnectKeybind(name)
-    if KeybindConnections[name] then
-        KeybindConnections[name]:Disconnect()
-        KeybindConnections[name] = nil
-    end
+-- Biến lưu trạng thái đang rebind
+local isRebinding = false
+local rebindingFor = nil
+
+-- Helper: Chuyển key name sang dạng hiển thị
+local function keyName(key)
+    if key == "Insert" then return "INS" end
+    if key == "Delete" then return "DEL" end
+    if key == "Home" then return "HOME" end
+    if key == "End" then return "END" end
+    if key == "PageUp" then return "PGUP" end
+    if key == "PageDown" then return "PGDN" end
+    if key == "RightControl" then return "RCTRL" end
+    if key == "LeftControl" then return "LCTRL" end
+    if key == "RightShift" then return "RSHIFT" end
+    if key == "LeftShift" then return "LSHIFT" end
+    return key
 end
 
-local function connectKeybind(name, keyCode, callback)
-    disconnectKeybind(name)
-    KeybindConnections[name] = UIS.InputBegan:Connect(function(input, gameProcessed)
-        if gameProcessed then return end
-        if input.KeyCode == keyCode or input.UserInputType == keyCode then
-            callback()
-        end
-    end)
+-- Tạo label hiển thị keybind hiện tại + nút rebind
+local HitboxKeyLabel = TabSettings:CreateLabel("Toggle Head Hitbox: [F]")
+local AuraKeyLabel   = TabSettings:CreateLabel("Toggle Aura: [G]")
+local GUIKeyLabel    = TabSettings:CreateLabel("Open/Close GUI: [Insert]")
+
+local function updateKeyLabels()
+    HitboxKeyLabel:Set("Toggle Head Hitbox: [" .. keyName(getgenv().KB_Hitbox_Key) .. "]")
+    AuraKeyLabel:Set("Toggle Aura: [" .. keyName(getgenv().KB_Aura_Key) .. "]")
+    GUIKeyLabel:Set("Open/Close GUI: [" .. keyName(getgenv().KB_GUI_Key) .. "]")
 end
 
--- Hitbox keybind
-local KB_Hit_Label = TabSettings:CreateLabel("Hitbox Keybind: [F]")
-TabSettings:CreateInput({
-    Name = "Set Hitbox Keybind",
-    CurrentValue = "F",
-    PlaceholderText = "Nhập phím (vd: F, G, LeftShift...)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "KB_Hit_Input",
-    Callback = function(v)
-        local keyName = v:upper():gsub(" ", "")
-        local keyCode = Enum.KeyCode[keyName]
-        if keyCode then
-            getgenv().Keybinds.Hitbox = keyName
-            KB_Hit_Label:Set("Hitbox Keybind: [" .. keyName .. "]")
-            connectKeybind("Hitbox", keyCode, function()
-                setHitbox(not getgenv().HeadHitboxOn)
-            end)
-        end
+-- Nút rebind cho từng keybind
+TabSettings:CreateButton({
+    Name = "Rebind: Toggle Head Hitbox",
+    Callback = function()
+        if isRebinding then return end
+        isRebinding = true
+        rebindingFor = "hitbox"
+        HitboxKeyLabel:Set("Toggle Head Hitbox: [PRESS KEY...]")
+        Rayfield:Notify({ Title="Rebinding", Content="Press any key to bind...", Duration=3 })
     end
 })
 
--- Aura keybind
-local KB_Aura_Label = TabSettings:CreateLabel("Aura Keybind: [G]")
-TabSettings:CreateInput({
-    Name = "Set Aura Keybind",
-    CurrentValue = "G",
-    PlaceholderText = "Nhập phím (vd: F, G, LeftShift...)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "KB_Aura_Input",
-    Callback = function(v)
-        local keyName = v:upper():gsub(" ", "")
-        local keyCode = Enum.KeyCode[keyName]
-        if keyCode then
-            getgenv().Keybinds.Aura = keyName
-            KB_Aura_Label:Set("Aura Keybind: [" .. keyName .. "]")
-            connectKeybind("Aura", keyCode, function()
-                setAura(not getgenv().AuraOn)
-            end)
-        end
+TabSettings:CreateButton({
+    Name = "Rebind: Toggle Aura",
+    Callback = function()
+        if isRebinding then return end
+        isRebinding = true
+        rebindingFor = "aura"
+        AuraKeyLabel:Set("Toggle Aura: [PRESS KEY...]")
+        Rayfield:Notify({ Title="Rebinding", Content="Press any key to bind...", Duration=3 })
     end
 })
 
--- GUI keybind
-local KB_GUI_Label = TabSettings:CreateLabel("GUI Keybind: [Insert]")
-TabSettings:CreateInput({
-    Name = "Set GUI Keybind",
-    CurrentValue = "Insert",
-    PlaceholderText = "Nhập phím (vd: Insert, Delete, RightControl...)",
-    RemoveTextAfterFocusLost = false,
-    Flag = "KB_GUI_Input",
-    Callback = function(v)
-        local keyName = v:gsub(" ", "")
-        local keyCode = Enum.KeyCode[keyName]
-        if keyCode then
-            getgenv().Keybinds.GUI = keyName
-            KB_GUI_Label:Set("GUI Keybind: [" .. keyName .. "]")
-            connectKeybind("GUI", keyCode, function()
-                pcall(function() Rayfield:ToggleUI() end)
-            end)
-        end
+TabSettings:CreateButton({
+    Name = "Rebind: Open/Close GUI",
+    Callback = function()
+        if isRebinding then return end
+        isRebinding = true
+        rebindingFor = "gui"
+        GUIKeyLabel:Set("Open/Close GUI: [PRESS KEY...]")
+        Rayfield:Notify({ Title="Rebinding", Content="Press any key to bind...", Duration=3 })
     end
 })
 
--- Khởi tạo keybind mặc định
-connectKeybind("Hitbox", Enum.KeyCode.F, function()
-    setHitbox(not getgenv().HeadHitboxOn)
-end)
-connectKeybind("Aura", Enum.KeyCode.G, function()
-    setAura(not getgenv().AuraOn)
-end)
-connectKeybind("GUI", Enum.KeyCode.Insert, function()
-    pcall(function() Rayfield:ToggleUI() end)
+-- Input handler cho rebind + keybind
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    local key = input.KeyCode.Name
+
+    -- Đang rebind
+    if isRebinding and rebindingFor then
+        -- Không cho phép bind phím đang dùng cho chức năng khác
+        if rebindingFor ~= "hitbox" and key == getgenv().KB_Hitbox_Key then
+            Rayfield:Notify({ Title="Error", Content="Key already used for Head Hitbox!", Duration=3 })
+            isRebinding = false; rebindingFor = nil; updateKeyLabels(); return
+        end
+        if rebindingFor ~= "aura" and key == getgenv().KB_Aura_Key then
+            Rayfield:Notify({ Title="Error", Content="Key already used for Aura!", Duration=3 })
+            isRebinding = false; rebindingFor = nil; updateKeyLabels(); return
+        end
+        if rebindingFor ~= "gui" and key == getgenv().KB_GUI_Key then
+            Rayfield:Notify({ Title="Error", Content="Key already used for GUI!", Duration=3 })
+            isRebinding = false; rebindingFor = nil; updateKeyLabels(); return
+        end
+
+        if rebindingFor == "hitbox" then
+            getgenv().KB_Hitbox_Key = key
+            Rayfield:Notify({ Title="Rebound", Content="Head Hitbox → " .. key, Duration=3 })
+        elseif rebindingFor == "aura" then
+            getgenv().KB_Aura_Key = key
+            Rayfield:Notify({ Title="Rebound", Content="Aura → " .. key, Duration=3 })
+        elseif rebindingFor == "gui" then
+            getgenv().KB_GUI_Key = key
+            Rayfield:Notify({ Title="Rebound", Content="GUI → " .. key, Duration=3 })
+        end
+        isRebinding = false
+        rebindingFor = nil
+        updateKeyLabels()
+        return
+    end
+
+    -- Normal keybind execution
+    if key == getgenv().KB_Hitbox_Key then
+        setHitbox(not getgenv().HeadHitboxOn)
+    elseif key == getgenv().KB_Aura_Key then
+        setAura(not getgenv().AuraOn)
+    elseif key == getgenv().KB_GUI_Key then
+        pcall(function() Rayfield:ToggleUI() end)
+    end
 end)
 
 TabSettings:CreateSection("Quick Button")
@@ -816,5 +853,5 @@ QuickBtn.MouseButton1Click:Connect(function()
 end)
 
 task.delay(2, function()
-    Rayfield:Notify({ Title="Aholo oper1", Content="make by : Aholo", Duration=4 })
+    Rayfield:Notify({ Title="Aholo oper1", Content="remake by : Aholo | ESP & Keybind Fixed", Duration=4 })
 end)
