@@ -816,5 +816,5 @@ QuickBtn.MouseButton1Click:Connect(function()
 end)
 
 task.delay(2, function()
-    Rayfield:Notify({ Title="Aholo oper1", Content="remake by : Aholo | ESP Fix + Keybind Manager", Duration=4 })
+    Rayfield:Notify({ Title="Aholo oper1", Content="make by : Aholo", Duration=4 })
 end)
