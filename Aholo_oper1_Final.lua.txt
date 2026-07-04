@@ -1,0 +1,1354 @@
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local Camera     = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Teams      = game:GetService("Teams")
+
+-- ============================================================
+-- GLOBAL VARS
+-- ============================================================
+getgenv().HeadSize         = 6
+getgenv().HeadTransparency = 0.5
+getgenv().HeadHitboxOn     = false
+getgenv().HeadTeamCheck    = false
+getgenv().HeadFriendOnly   = false
+
+-- HEADSIZE TYPE: 1 = resize head gốc, 2 = fake head (giữ head gốc visible)
+getgenv().HeadSizeType     = 1
+
+-- TORSO HITBOX (Type 3 - riêng biệt)
+getgenv().TorsoHitboxOn      = false
+getgenv().TorsoSize          = 6
+getgenv().TorsoTransparency  = 0.5
+getgenv().TorsoTeamCheck     = false
+getgenv().TorsoFriendOnly    = false
+
+getgenv().ESP_Outline = false
+getgenv().ESP_Tracer  = false
+getgenv().ESP_Info    = false
+getgenv().ESP_HP      = false
+
+getgenv().AuraOn         = false
+getgenv().AuraRange      = 8
+getgenv().AuraTeamCheck  = false
+getgenv().AuraFriendOnly = false
+getgenv().AuraMode       = "tool"
+
+getgenv().TargetPlayers   = true
+getgenv().TargetNPC       = false
+getgenv().NPCHostileOnly  = false
+getgenv().NPCFriendlyOnly = false
+
+-- ADVANCED TEAM CHECK (Head)
+getgenv().AdvTeamCheck_Enabled = false
+getgenv().AdvTeamCheck_Teams   = {}
+
+-- ADVANCED TEAM CHECK (Aura)
+getgenv().AdvAuraTeamCheck_Enabled = false
+getgenv().AdvAuraTeamCheck_Teams   = {}
+
+local isMobile = UIS.TouchEnabled and not UIS.KeyboardEnabled
+
+local npcCache  = {}
+local lastScan  = 0
+local SCAN_RATE = 2
+
+-- Lưu trữ fake parts
+local fakeHeads  = {}
+local fakeTorsos = {}
+
+-- Theo dõi character để respawn
+local playerCharacters = {}
+
+-- ============================================================
+-- TEAM SCANNING
+-- ============================================================
+local function getAllTeamNames()
+    local names = {}
+    for _, team in ipairs(Teams:GetTeams()) do
+        table.insert(names, team.Name)
+    end
+    return names
+end
+
+local function refreshTeamList()
+    local names = getAllTeamNames()
+    for _, name in ipairs(names) do
+        if getgenv().AdvTeamCheck_Teams[name] == nil then
+            getgenv().AdvTeamCheck_Teams[name] = true
+        end
+        if getgenv().AdvAuraTeamCheck_Teams[name] == nil then
+            getgenv().AdvAuraTeamCheck_Teams[name] = true
+        end
+    end
+    return names
+end
+
+-- ============================================================
+-- NPC
+-- ============================================================
+local function refreshNPCs()
+    npcCache = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj ~= LocalPlayer.Character then
+            local hum = obj:FindFirstChildOfClass("Humanoid")
+            local hrp = obj:FindFirstChild("HumanoidRootPart")
+            if hum and hrp then
+                local isPC = false
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p.Character == obj then isPC = true; break end
+                end
+                if not isPC then table.insert(npcCache, obj) end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- NPC HOSTILE / FRIENDLY
+-- ============================================================
+local function isNPCTargetingPlayer(model)
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+
+    local targeting = false
+    pcall(function()
+        if hum.Target and hum.Target:IsDescendantOf(workspace) then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Character and (hum.Target == p.Character or hum.Target:IsDescendantOf(p.Character)) then
+                    targeting = true
+                    return
+                end
+            end
+        end
+    end)
+    if targeting then return true end
+
+    for _, desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("ObjectValue") and desc.Value then
+            local n = desc.Name:lower()
+            if n:find("target") or n:find("attack") or n:find("victim") or n:find("aggro") then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    local chr = p.Character
+                    if chr and (desc.Value == chr or desc.Value:IsDescendantOf(chr)) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    local hrp = model:FindFirstChild("HumanoidRootPart")
+    local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp and myHrp then
+        local dist = (hrp.Position - myHrp.Position).Magnitude
+        if dist < 50 then
+            local lookDir = hrp.CFrame.LookVector
+            local toPlayer = (myHrp.Position - hrp.Position).Unit
+            local dot = lookDir:Dot(toPlayer)
+            if dot > 0.7 then
+                if hum and hum.MoveDirection.Magnitude > 0 then
+                    local moveDir = hum.MoveDirection.Unit
+                    local dot2 = moveDir:Dot(toPlayer)
+                    if dot2 > 0.5 then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function getNPCAlign(model)
+    if isNPCTargetingPlayer(model) then
+        return "hostile"
+    end
+
+    for _, a in ipairs({"Hostile","IsHostile","Enemy","IsEnemy","Aggressive","hostile","enemy"}) do
+        if model:GetAttribute(a) == true then return "hostile" end
+    end
+    for _, a in ipairs({"Friendly","IsFriendly","Ally","IsAlly","friendly","ally"}) do
+        if model:GetAttribute(a) == true then return "friendly" end
+    end
+
+    for _, desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("BoolValue") then
+            local n = desc.Name:lower()
+            if (n=="hostile" or n=="enemy" or n=="aggressive") and desc.Value then return "hostile" end
+            if (n=="friendly" or n=="ally") and desc.Value then return "friendly" end
+        end
+    end
+
+    return "unknown"
+end
+
+local function shouldTargetNPC(model)
+    if not getgenv().TargetNPC then return false end
+    if not model or not model.Parent then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+
+    local align = getNPCAlign(model)
+    if getgenv().NPCHostileOnly and align ~= "hostile" then return false end
+    if getgenv().NPCFriendlyOnly and align ~= "friendly" then return false end
+
+    return true
+end
+
+local function getNPCColor(model)
+    local align = getNPCAlign(model)
+    if align == "hostile"  then return Color3.fromRGB(255, 60, 60) end
+    if align == "friendly" then return Color3.fromRGB(60, 220, 60) end
+    return Color3.fromRGB(255, 160, 0)
+end
+
+-- ============================================================
+-- TARGET LOGIC
+-- ============================================================
+local function shouldTarget(v)
+    if v == LocalPlayer then return false end
+    if not getgenv().TargetPlayers then return false end
+
+    if getgenv().AdvTeamCheck_Enabled then
+        if v.Team then
+            local teamName = v.Team.Name
+            return getgenv().AdvTeamCheck_Teams[teamName] == true
+        end
+        return true
+    end
+
+    if getgenv().HeadTeamCheck and LocalPlayer.Team == v.Team then return false end
+    if getgenv().HeadFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
+    return true
+end
+
+local function shouldTargetTorso(v)
+    if v == LocalPlayer then return false end
+    if not getgenv().TargetPlayers then return false end
+
+    if getgenv().AdvTeamCheck_Enabled then
+        if v.Team then
+            local teamName = v.Team.Name
+            return getgenv().AdvTeamCheck_Teams[teamName] == true
+        end
+        return true
+    end
+
+    if getgenv().TorsoTeamCheck and LocalPlayer.Team == v.Team then return false end
+    if getgenv().TorsoFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
+    return true
+end
+
+local function auraTarget(v)
+    if v == LocalPlayer then return false end
+
+    if getgenv().AdvAuraTeamCheck_Enabled then
+        if v.Team then
+            local teamName = v.Team.Name
+            return getgenv().AdvAuraTeamCheck_Teams[teamName] == true
+        end
+        return true
+    end
+
+    if getgenv().AuraTeamCheck and LocalPlayer.Team == v.Team then return false end
+    if getgenv().AuraFriendOnly and LocalPlayer:IsFriendsWith(v.UserId) then return false end
+    return true
+end
+
+local function getTeamColor(v)
+    if v.Team then return v.Team.TeamColor.Color end
+    return Color3.fromRGB(255, 50, 50)
+end
+
+-- ============================================================
+-- FAKE PART MANAGER - FIX TRANSPARENCY & COLLISION
+-- ============================================================
+local function safeTransparency(t)
+    return math.clamp(t, 0, 0.99)
+end
+
+local function createFakeHead(targetKey, realHead)
+    if fakeHeads[targetKey] and fakeHeads[targetKey].Parent then
+        return fakeHeads[targetKey]
+    end
+
+    if fakeHeads[targetKey] then
+        pcall(function() fakeHeads[targetKey]:Destroy() end)
+    end
+
+    local fake = Instance.new("Part")
+    fake.Name = "Head"
+    fake.Shape = Enum.PartType.Ball
+    fake.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+    fake.Transparency = safeTransparency(getgenv().HeadTransparency)
+    fake.CanCollide = false
+    fake.CanTouch = true
+    fake.CanQuery = true
+    fake.Massless = true
+    fake.Anchored = false
+    fake.Color = realHead.Color
+    fake.Material = realHead.Material
+    fake.TopSurface = Enum.SurfaceType.Smooth
+    fake.BottomSurface = Enum.SurfaceType.Smooth
+    fake.Parent = realHead.Parent
+
+    local weld = Instance.new("Weld")
+    weld.Part0 = fake
+    weld.Part1 = realHead
+    weld.C0 = CFrame.new(0, 0, 0)
+    weld.Parent = fake
+
+    fakeHeads[targetKey] = fake
+    return fake
+end
+
+local function createFakeTorso(targetKey, realTorso)
+    if fakeTorsos[targetKey] and fakeTorsos[targetKey].Parent then
+        return fakeTorsos[targetKey]
+    end
+
+    if fakeTorsos[targetKey] then
+        pcall(function() fakeTorsos[targetKey]:Destroy() end)
+    end
+
+    local fake = Instance.new("Part")
+    fake.Name = "Torso"
+    fake.Shape = Enum.PartType.Block
+    fake.Size = Vector3.new(getgenv().TorsoSize, getgenv().TorsoSize, getgenv().TorsoSize)
+    fake.Transparency = safeTransparency(getgenv().TorsoTransparency)
+    fake.CanCollide = false
+    fake.CanTouch = true
+    fake.CanQuery = true
+    fake.Massless = true
+    fake.Anchored = false
+    fake.Color = realTorso.Color
+    fake.Material = realTorso.Material
+    fake.TopSurface = Enum.SurfaceType.Smooth
+    fake.BottomSurface = Enum.SurfaceType.Smooth
+    fake.Parent = realTorso.Parent
+
+    local weld = Instance.new("Weld")
+    weld.Part0 = fake
+    weld.Part1 = realTorso
+    weld.C0 = CFrame.new(0, 0, 0)
+    weld.Parent = fake
+
+    fakeTorsos[targetKey] = fake
+    return fake
+end
+
+local function removeFakeHead(targetKey)
+    local fake = fakeHeads[targetKey]
+    if fake then
+        pcall(function() fake:Destroy() end)
+        fakeHeads[targetKey] = nil
+    end
+end
+
+local function removeFakeTorso(targetKey)
+    local fake = fakeTorsos[targetKey]
+    if fake then
+        pcall(function() fake:Destroy() end)
+        fakeTorsos[targetKey] = nil
+    end
+end
+
+local function clearAllFakeHeads()
+    for k, fake in pairs(fakeHeads) do
+        pcall(function() fake:Destroy() end)
+    end
+    fakeHeads = {}
+end
+
+local function clearAllFakeTorsos()
+    for k, fake in pairs(fakeTorsos) do
+        pcall(function() fake:Destroy() end)
+    end
+    fakeTorsos = {}
+end
+
+-- ============================================================
+-- APPLY HEADS & TORSO HITBOX
+-- ============================================================
+local function getTorsoFromCharacter(char)
+    return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("LowerTorso") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function applyHeads()
+    local type1 = getgenv().HeadSizeType == 1
+    local type2 = getgenv().HeadSizeType == 2
+    local hitboxOn = getgenv().HeadHitboxOn
+    local torsoOn = getgenv().TorsoHitboxOn
+
+    if torsoOn then
+        for k in pairs(fakeHeads) do
+            removeFakeHead(k)
+        end
+        for _, v in ipairs(Players:GetPlayers()) do
+            if v.Character then
+                local head = v.Character:FindFirstChild("Head")
+                if head then
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                end
+            end
+        end
+        for _, model in ipairs(npcCache) do
+            if model and model.Parent then
+                local head = model:FindFirstChild("Head")
+                if head then
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                end
+            end
+        end
+        return
+    end
+
+    -- Players
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v == LocalPlayer or not v.Character then
+            removeFakeHead(v)
+        else
+            local head = v.Character:FindFirstChild("Head")
+            if not head then
+                removeFakeHead(v)
+            else
+                local shouldHit = hitboxOn and shouldTarget(v)
+                if type1 then
+                    removeFakeHead(v)
+                    if shouldHit then
+                        head.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+                        head.Transparency = safeTransparency(getgenv().HeadTransparency)
+                        head.Massless = true
+                        head.CanCollide = false
+                    else
+                        head.Size = Vector3.new(2, 1, 1)
+                        head.Transparency = 0
+                        head.Massless = false
+                        head.CanCollide = false
+                    end
+                elseif type2 then
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                    if shouldHit then
+                        local fake = createFakeHead(v, head)
+                        fake.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+                        fake.Transparency = safeTransparency(getgenv().HeadTransparency)
+                    else
+                        removeFakeHead(v)
+                    end
+                else
+                    removeFakeHead(v)
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                end
+            end
+        end
+    end
+
+    -- NPC
+    for _, model in ipairs(npcCache) do
+        if not model or not model.Parent then
+            removeFakeHead(model)
+        else
+            local head = model:FindFirstChild("Head")
+            if not head then
+                removeFakeHead(model)
+            else
+                local shouldHit = hitboxOn and shouldTargetNPC(model)
+                if type1 then
+                    removeFakeHead(model)
+                    if shouldHit then
+                        head.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+                        head.Transparency = safeTransparency(getgenv().HeadTransparency)
+                        head.Massless = true
+                        head.CanCollide = false
+                    else
+                        head.Size = Vector3.new(2, 1, 1)
+                        head.Transparency = 0
+                        head.Massless = false
+                        head.CanCollide = false
+                    end
+                elseif type2 then
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                    if shouldHit then
+                        local fake = createFakeHead(model, head)
+                        if fake then
+                            fake.Size = Vector3.new(getgenv().HeadSize, getgenv().HeadSize, getgenv().HeadSize)
+                            fake.Transparency = safeTransparency(getgenv().HeadTransparency)
+                        end
+                    else
+                        removeFakeHead(model)
+                    end
+                else
+                    removeFakeHead(model)
+                    head.Size = Vector3.new(2, 1, 1)
+                    head.Transparency = 0
+                    head.Massless = false
+                    head.CanCollide = false
+                end
+            end
+        end
+    end
+end
+
+local function applyTorsoHitbox()
+    if not getgenv().TorsoHitboxOn then
+        clearAllFakeTorsos()
+        return
+    end
+
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v == LocalPlayer or not v.Character then
+            removeFakeTorso(v)
+        else
+            local torso = getTorsoFromCharacter(v.Character)
+            if not torso then
+                removeFakeTorso(v)
+            else
+                local shouldHit = shouldTargetTorso(v)
+                if shouldHit then
+                    local fake = createFakeTorso(v, torso)
+                    fake.Size = Vector3.new(getgenv().TorsoSize, getgenv().TorsoSize, getgenv().TorsoSize)
+                    fake.Transparency = safeTransparency(getgenv().TorsoTransparency)
+                else
+                    removeFakeTorso(v)
+                end
+            end
+        end
+    end
+
+    for _, model in ipairs(npcCache) do
+        if not model or not model.Parent then
+            removeFakeTorso(model)
+        else
+            local torso = getTorsoFromCharacter(model)
+            if not torso then
+                removeFakeTorso(model)
+            else
+                local shouldHit = shouldTargetNPC(model)
+                if shouldHit then
+                    local fake = createFakeTorso(model, torso)
+                    fake.Size = Vector3.new(getgenv().TorsoSize, getgenv().TorsoSize, getgenv().TorsoSize)
+                    fake.Transparency = safeTransparency(getgenv().TorsoTransparency)
+                else
+                    removeFakeTorso(model)
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- RESPAWN / JOIN FIX
+-- ============================================================
+local function onPlayerCharacterAdded(player, character)
+    task.delay(0.5, function()
+        if not character or not character.Parent then return end
+        if getgenv().HeadHitboxOn and getgenv().HeadSizeType == 2 and shouldTarget(player) then
+            local head = character:FindFirstChild("Head")
+            if head then
+                head.Size = Vector3.new(2, 1, 1)
+                head.Transparency = 0
+                head.Massless = false
+                head.CanCollide = false
+                createFakeHead(player, head)
+            end
+        end
+        if getgenv().TorsoHitboxOn and shouldTargetTorso(player) then
+            local torso = getTorsoFromCharacter(character)
+            if torso then
+                createFakeTorso(player, torso)
+            end
+        end
+    end)
+end
+
+for _, v in ipairs(Players:GetPlayers()) do
+    if v ~= LocalPlayer then
+        playerCharacters[v] = v.Character
+        v.CharacterAdded:Connect(function(char)
+            playerCharacters[v] = char
+            onPlayerCharacterAdded(v, char)
+        end)
+    end
+end
+
+Players.PlayerAdded:Connect(function(v)
+    if v == LocalPlayer then return end
+    playerCharacters[v] = v.Character
+    v.CharacterAdded:Connect(function(char)
+        playerCharacters[v] = char
+        onPlayerCharacterAdded(v, char)
+    end)
+    if v.Character then
+        onPlayerCharacterAdded(v, v.Character)
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(plr)
+    removeFakeHead(plr)
+    removeFakeTorso(plr)
+    playerCharacters[plr] = nil
+end)
+
+-- ============================================================
+-- MAIN LOOPS
+-- ============================================================
+RunService.RenderStepped:Connect(applyHeads)
+RunService.RenderStepped:Connect(applyTorsoHitbox)
+RunService.RenderStepped:Connect(function()
+    if tick() - lastScan >= SCAN_RATE then refreshNPCs(); lastScan = tick() end
+end)
+
+-- ============================================================
+-- AURA
+-- ============================================================
+RunService.RenderStepped:Connect(function()
+    if not getgenv().AuraOn then return end
+    local chr = LocalPlayer.Character; if not chr then return end
+    local inRange = false
+
+    for _, v in ipairs(Players:GetPlayers()) do
+        if auraTarget(v) then
+            local vc = v.Character; if vc then
+                local hum = vc:FindFirstChildOfClass("Humanoid")
+                local hrp = vc:FindFirstChild("HumanoidRootPart")
+                if hum and hrp and hum.Health > 0 then
+                    if LocalPlayer:DistanceFromCharacter(hrp.Position) <= getgenv().AuraRange then
+                        inRange = true
+                        if getgenv().AuraMode == "tool" then
+                            local tool = chr:FindFirstChildOfClass("Tool")
+                            if tool and tool:FindFirstChild("Handle") then
+                                tool:Activate()
+                                for _, part in next, vc:GetChildren() do
+                                    if part:IsA("BasePart") then
+                                        firetouchinterest(tool.Handle, part, 0)
+                                        firetouchinterest(tool.Handle, part, 1)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if getgenv().TargetNPC then
+        for _, model in ipairs(npcCache) do
+            if shouldTargetNPC(model) then
+                local hrp = model:FindFirstChild("HumanoidRootPart")
+                if hrp and LocalPlayer:DistanceFromCharacter(hrp.Position) <= getgenv().AuraRange then
+                    inRange = true
+                    if getgenv().AuraMode == "tool" then
+                        local tool = chr:FindFirstChildOfClass("Tool")
+                        if tool and tool:FindFirstChild("Handle") then
+                            tool:Activate()
+                            for _, part in next, model:GetChildren() do
+                                if part:IsA("BasePart") then
+                                    firetouchinterest(tool.Handle, part, 0)
+                                    firetouchinterest(tool.Handle, part, 1)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if getgenv().AuraMode == "m1" and inRange then
+        local tool = chr:FindFirstChildOfClass("Tool")
+        if isMobile then
+            if tool then pcall(function() tool:Activate() end) end
+        else
+            pcall(function() mouse1click() end)
+        end
+    end
+end)
+
+-- ============================================================
+-- ESP
+-- ============================================================
+local espData = {}
+
+local function clearESP(key)
+    local d = espData[key]; if not d then return end
+    for _, obj in pairs(d) do
+        pcall(function()
+            if typeof(obj) == "Instance" then obj:Destroy() else obj:Remove() end
+        end)
+    end
+    espData[key] = nil
+end
+
+local function clearAll()
+    for k in pairs(espData) do clearESP(k) end
+end
+
+local function newText(col)
+    local t = Drawing.new("Text")
+    t.Visible = true; t.Color = col; t.Size = 13
+    t.Font = Drawing.Fonts.UI; t.Outline = true
+    t.OutlineColor = Color3.new(0, 0, 0); t.Center = true
+    return t
+end
+
+local function newLine(col)
+    local l = Drawing.new("Line")
+    l.Visible = true; l.Color = col; l.Thickness = 1.2; l.Transparency = 1
+    return l
+end
+
+local function getBounds(model)
+    local hrp  = model:FindFirstChild("HumanoidRootPart")
+    local head = model:FindFirstChild("Head")
+    if not hrp or not head then return end
+    local top, onT = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, head.Size.Y * 0.5, 0))
+    local bot, onB = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+    if not onT or not onB or top.Z <= 0 then return end
+    return top, bot
+end
+
+local function drawESP(key, model, col, nameStr, dist)
+    if not espData[key] then espData[key] = {} end
+    local d = espData[key]
+
+    if getgenv().ESP_Outline then
+        if not d.hl then
+            local hl = Instance.new("Highlight")
+            hl.FillTransparency    = 1
+            hl.OutlineTransparency = 0
+            hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent              = workspace
+            d.hl = hl
+        end
+        d.hl.Adornee      = model
+        d.hl.OutlineColor = col
+    elseif d.hl then
+        d.hl:Destroy(); d.hl = nil
+    end
+
+    local top, bot = getBounds(model)
+    if not top then
+        for _, k in pairs({"tr","nm","di","hpt"}) do
+            if d[k] then pcall(function() d[k]:Remove() end); d[k] = nil end
+        end
+        return
+    end
+
+    local vp  = Camera.ViewportSize
+    local tb  = Vector2.new(vp.X * 0.5, vp.Y)
+    local cx  = top.X
+    local y1  = top.Y
+    local y2  = bot.Y
+
+    if getgenv().ESP_Tracer then
+        if not d.tr then d.tr = newLine(col) end
+        d.tr.Color = col; d.tr.From = tb; d.tr.To = Vector2.new(cx, y2); d.tr.Visible = true
+    elseif d.tr then d.tr.Visible = false end
+
+    local infoY = y1 - 16
+    if getgenv().ESP_Info then
+        if not d.nm then d.nm = newText(col) end
+        if not d.di then d.di = newText(Color3.new(1, 1, 1)) end
+        d.nm.Color = col; d.nm.Text = nameStr
+        d.nm.Position = Vector2.new(cx, infoY); d.nm.Visible = true
+        d.di.Text = dist .. " m"
+        d.di.Position = Vector2.new(cx, infoY + 13); d.di.Visible = true
+    elseif d.nm then
+        d.nm.Visible = false
+        if d.di then d.di.Visible = false end
+    end
+
+    if getgenv().ESP_HP then
+        local hum   = model:FindFirstChildOfClass("Humanoid")
+        local hp    = hum and math.floor(hum.Health)    or 0
+        local maxHp = hum and math.max(math.floor(hum.MaxHealth), 1) or 100
+        local pct   = math.floor(hp / maxHp * 100)
+        local r     = math.floor(255 * (1 - pct / 100))
+        local g     = math.floor(255 * (pct / 100))
+        local hpCol = Color3.fromRGB(r, g, 0)
+        if not d.hpt then d.hpt = newText(hpCol) end
+        d.hpt.Color    = hpCol
+        d.hpt.Text     = hp .. " HP (" .. pct .. "%)"
+        local hpY = getgenv().ESP_Info and (infoY + 26) or (infoY + 13)
+        d.hpt.Position = Vector2.new(cx, hpY); d.hpt.Visible = true
+    elseif d.hpt then d.hpt.Visible = false end
+end
+
+RunService.RenderStepped:Connect(function()
+    local anyOn = getgenv().ESP_Outline or getgenv().ESP_Tracer or getgenv().ESP_Info or getgenv().ESP_HP
+    if not anyOn then clearAll(); return end
+
+    local lhrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+    if getgenv().TargetPlayers then
+        for _, v in ipairs(Players:GetPlayers()) do
+            if shouldTarget(v) then
+                local chr = v.Character; if chr then
+                    local hrp = chr:FindFirstChild("HumanoidRootPart"); if hrp then
+                        local dist = lhrp and math.floor((lhrp.Position - hrp.Position).Magnitude) or 0
+                        drawESP(v, chr, getTeamColor(v), v.DisplayName, dist)
+                    end
+                else
+                    clearESP(v)
+                end
+            else
+                clearESP(v)
+            end
+        end
+    end
+
+    if getgenv().TargetNPC then
+        local active = {}
+        for _, model in ipairs(npcCache) do
+            if shouldTargetNPC(model) then
+                local hrp = model:FindFirstChild("HumanoidRootPart"); if hrp then
+                    local dist = lhrp and math.floor((lhrp.Position - hrp.Position).Magnitude) or 0
+                    active[model] = true
+                    drawESP(model, model, getNPCColor(model), model.Name, dist)
+                end
+            else
+                clearESP(model)
+            end
+        end
+        for k in pairs(espData) do
+            local isP = false
+            for _, p in ipairs(Players:GetPlayers()) do if p == k then isP = true; break end end
+            if not isP and not active[k] then clearESP(k) end
+        end
+    end
+
+    for k in pairs(espData) do
+        if typeof(k) == "Instance" and k:IsA("Player") and not k.Parent then clearESP(k) end
+    end
+end)
+
+Players.PlayerRemoving:Connect(clearESP)
+
+-- ============================================================
+-- SYNC HELPERS
+-- ============================================================
+local function syncQuickBtn(state)
+    if not QuickBtn then return end
+    QuickBtn.Text = state and "HEAD\nON" or "HEAD\nOFF"
+    QuickBtn.BackgroundColor3 = state
+        and Color3.fromRGB(0, 185, 85) or Color3.fromRGB(0, 100, 170)
+end
+
+local function setHitbox(state)
+    getgenv().HeadHitboxOn = state
+    syncQuickBtn(state)
+    pcall(function() Rayfield.Flags.HHit:Set(state) end)
+end
+
+local function setTorsoHitbox(state)
+    getgenv().TorsoHitboxOn = state
+    if state then
+        getgenv().HeadHitboxOn = false
+        getgenv().HeadSizeType = 0
+        pcall(function() Rayfield.Flags.HHit:Set(false) end)
+        pcall(function() Rayfield.Flags.HType1:Set(false) end)
+        pcall(function() Rayfield.Flags.HType2:Set(false) end)
+        clearAllFakeHeads()
+        for _, v in ipairs(Players:GetPlayers()) do
+            if v.Character then
+                local h = v.Character:FindFirstChild("Head")
+                if h then h.Size = Vector3.new(2,1,1); h.Transparency = 0; h.Massless = false; h.CanCollide = false end
+            end
+        end
+        syncQuickBtn(false)
+    else
+        clearAllFakeTorsos()
+    end
+    pcall(function() Rayfield.Flags.TorsoHit:Set(state) end)
+end
+
+local function setAura(state)
+    getgenv().AuraOn = state
+    pcall(function() Rayfield.Flags.AOn:Set(state) end)
+end
+
+-- ============================================================
+-- RAYFIELD UI
+-- ============================================================
+Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+    Name                   = "Aholo oper1",
+    LoadingTitle           = "Aholo oper1",
+    LoadingSubtitle        = "remake by : Aholo",
+    Theme                  = "Rose",
+    DisableRayfieldPrompts = true,
+    DisableBuildWarnings   = true,
+    ConfigurationSaving    = { Enabled = false },
+    KeySystem              = false,
+})
+
+-- ── TARGET ────────────────────────────────────────────────────
+local TabTarget = Window:CreateTab("Target", 4483362458)
+TabTarget:CreateSection("Target Mode")
+
+TabTarget:CreateToggle({ Name="Players", CurrentValue=true, Flag="TP",
+    Callback=function(v) getgenv().TargetPlayers = v end })
+
+TabTarget:CreateToggle({ Name="NPC", CurrentValue=false, Flag="TNPC",
+    Callback=function(v)
+        getgenv().TargetNPC = v
+        if v then refreshNPCs() end
+        if not v then
+            for _, model in ipairs(npcCache) do pcall(function()
+                local h = model:FindFirstChild("Head")
+                if h then h.Size=Vector3.new(2,1,1); h.Transparency=0; h.Massless=false; h.CanCollide=false end
+            end) end
+            for _, model in ipairs(npcCache) do
+                removeFakeHead(model)
+                removeFakeTorso(model)
+            end
+        end
+    end })
+
+TabTarget:CreateSection("NPC Filter")
+TabTarget:CreateParagraph({ Title="Color legend",
+    Content="Red = Hostile (attacking player)  |  Green = Friendly (not attacking)  |  Orange = Unknown" })
+
+TabTarget:CreateToggle({ Name="Hostile Only (attacking player)", CurrentValue=false, Flag="NPCHos",
+    Callback=function(v)
+        getgenv().NPCHostileOnly = v
+        if v then getgenv().NPCFriendlyOnly = false end
+    end })
+
+TabTarget:CreateToggle({ Name="Friendly Only (not attacking player)", CurrentValue=false, Flag="NPCFri",
+    Callback=function(v)
+        getgenv().NPCFriendlyOnly = v
+        if v then getgenv().NPCHostileOnly = false end
+    end })
+
+-- ── HITBOX ────────────────────────────────────────────────────
+local TabHitbox = Window:CreateTab("Hitbox", 4483362458)
+TabHitbox:CreateSection("Head Size Types")
+
+TabHitbox:CreateParagraph({ Title="Head Size Types",
+    Content="Type 1: Resize original head\nType 2: Fake head (keep original visible)\nTorso: Separate torso hitbox (disables head)" })
+
+TabHitbox:CreateToggle({ Name="Type 1 - Resize Original Head", CurrentValue=false, Flag="HType1",
+    Callback=function(v)
+        if v then
+            getgenv().HeadSizeType = 1
+            getgenv().HeadHitboxOn = true
+            pcall(function() Rayfield.Flags.HType2:Set(false) end)
+            pcall(function() Rayfield.Flags.TorsoHit:Set(false) end)
+            setTorsoHitbox(false)
+            syncQuickBtn(true)
+        elseif getgenv().HeadSizeType == 1 then
+            getgenv().HeadSizeType = 0
+            getgenv().HeadHitboxOn = false
+            syncQuickBtn(false)
+        end
+    end })
+
+TabHitbox:CreateToggle({ Name="Type 2 - Fake Head (Keep Original Visible)", CurrentValue=false, Flag="HType2",
+    Callback=function(v)
+        if v then
+            getgenv().HeadSizeType = 2
+            getgenv().HeadHitboxOn = true
+            pcall(function() Rayfield.Flags.HType1:Set(false) end)
+            pcall(function() Rayfield.Flags.TorsoHit:Set(false) end)
+            setTorsoHitbox(false)
+            syncQuickBtn(true)
+        elseif getgenv().HeadSizeType == 2 then
+            getgenv().HeadSizeType = 0
+            getgenv().HeadHitboxOn = false
+            syncQuickBtn(false)
+        end
+    end })
+
+TabHitbox:CreateSection("Head Settings")
+
+TabHitbox:CreateInput({ Name="Head Size", CurrentValue="6", PlaceholderText="1 – 100",
+    RemoveTextAfterFocusLost=false, Flag="HSize",
+    Callback=function(v) local n=tonumber(v); if n then getgenv().HeadSize=math.clamp(n,1,100) end end })
+
+TabHitbox:CreateInput({ Name="Head Transparency", CurrentValue="0.5", PlaceholderText="0.0 – 0.99",
+    RemoveTextAfterFocusLost=false, Flag="HTrans",
+    Callback=function(v)
+        local n=tonumber(v)
+        if n then
+            getgenv().HeadTransparency=math.clamp(n,0,0.99)
+        end
+    end })
+
+TabHitbox:CreateToggle({ Name="Head Hitbox", CurrentValue=false, Flag="HHit",
+    Callback=function(s)
+        getgenv().HeadHitboxOn = s
+        if s then
+            setTorsoHitbox(false)
+            pcall(function() Rayfield.Flags.TorsoHit:Set(false) end)
+        end
+        syncQuickBtn(s)
+    end })
+
+TabHitbox:CreateSection("Head Filters")
+
+TabHitbox:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="HTC",
+    Callback=function(v)
+        getgenv().HeadTeamCheck = v
+        if v and getgenv().AdvTeamCheck_Enabled then
+            getgenv().AdvTeamCheck_Enabled = false
+            pcall(function() Rayfield.Flags.AdvTeam:Set(false) end)
+        end
+    end })
+
+TabHitbox:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="HFC",
+    Callback=function(v) getgenv().HeadFriendOnly=v end })
+
+-- ── TORSO HITBOX ─────────────────────────────────────────────
+TabHitbox:CreateSection("Torso Hitbox")
+
+TabHitbox:CreateParagraph({ Title="Torso Hitbox",
+    Content="Creates a SQUARE hitbox around torso.\nDisables head hitbox when active." })
+
+TabHitbox:CreateToggle({ Name="Enable Torso Hitbox", CurrentValue=false, Flag="TorsoHit",
+    Callback=function(v)
+        setTorsoHitbox(v)
+    end })
+
+TabHitbox:CreateInput({ Name="Torso Size", CurrentValue="6", PlaceholderText="1 – 100",
+    RemoveTextAfterFocusLost=false, Flag="TSize",
+    Callback=function(v) local n=tonumber(v); if n then getgenv().TorsoSize=math.clamp(n,1,100) end end })
+
+TabHitbox:CreateInput({ Name="Torso Transparency", CurrentValue="0.5", PlaceholderText="0.0 – 0.99",
+    RemoveTextAfterFocusLost=false, Flag="TTrans",
+    Callback=function(v)
+        local n=tonumber(v)
+        if n then
+            getgenv().TorsoTransparency=math.clamp(n,0,0.99)
+        end
+    end })
+
+TabHitbox:CreateSection("Torso Filters")
+
+TabHitbox:CreateToggle({ Name="Torso Team Check", CurrentValue=false, Flag="TTC",
+    Callback=function(v) getgenv().TorsoTeamCheck=v end })
+
+TabHitbox:CreateToggle({ Name="Torso Skip Friends", CurrentValue=false, Flag="TFC",
+    Callback=function(v) getgenv().TorsoFriendOnly=v end })
+
+-- ── ADVANCED TEAM CHECK (HEAD) ──────────────────────────────
+TabHitbox:CreateSection("Advanced Team Check")
+
+TabHitbox:CreateParagraph({ Title="How it works",
+    Content="ON = team được chọn sẽ BỊ DÍNH headsize\nOFF = team được chọn KHÔNG bị dính\nKhi bật Advanced, Team Check cũ sẽ tự tắt" })
+
+TabHitbox:CreateToggle({ Name="Enable Advanced Team Check", CurrentValue=false, Flag="AdvTeam",
+    Callback=function(v)
+        getgenv().AdvTeamCheck_Enabled = v
+        if v and getgenv().HeadTeamCheck then
+            getgenv().HeadTeamCheck = false
+            pcall(function() Rayfield.Flags.HTC:Set(false) end)
+        end
+        if v then refreshTeamList() end
+    end })
+
+local AdvTeamToggles = {}
+local function createAdvTeamToggles()
+    local teamNames = refreshTeamList()
+    for _, name in ipairs(teamNames) do
+        local flagName = "AdvTeam_" .. name:gsub(" ", "_")
+        local defaultVal = getgenv().AdvTeamCheck_Teams[name]
+        if defaultVal == nil then defaultVal = true end
+
+        local tgl = TabHitbox:CreateToggle({
+            Name = "[HEAD] " .. name,
+            CurrentValue = defaultVal,
+            Flag = flagName,
+            Callback = function(val)
+                getgenv().AdvTeamCheck_Teams[name] = val
+            end
+        })
+        table.insert(AdvTeamToggles, tgl)
+    end
+end
+
+task.delay(0.5, createAdvTeamToggles)
+
+-- ── ESP ───────────────────────────────────────────────────────
+local TabESP = Window:CreateTab("ESP", 4483362458)
+TabESP:CreateSection("Draw")
+
+TabESP:CreateToggle({ Name="Outline ESP (through walls)", CurrentValue=false, Flag="EOutline",
+    Callback=function(v) getgenv().ESP_Outline=v end })
+TabESP:CreateToggle({ Name="Tracers",     CurrentValue=false, Flag="ETrace", Callback=function(v) getgenv().ESP_Tracer=v end })
+TabESP:CreateToggle({ Name="Name + Dist", CurrentValue=false, Flag="EInfo",  Callback=function(v) getgenv().ESP_Info=v end })
+TabESP:CreateToggle({ Name="Health (HP + %)", CurrentValue=false, Flag="EHP", Callback=function(v) getgenv().ESP_HP=v end })
+
+-- ── AURA ─────────────────────────────────────────────────────
+local TabAura = Window:CreateTab("Aura", 4483362458)
+TabAura:CreateSection("Mode")
+
+TabAura:CreateDropdown({ Name="Aura Mode", Options={"Aura Tool","Auto M1"},
+    CurrentOption={"Aura Tool"}, Flag="AMode", MultipleOptions=false,
+    Callback=function(v) getgenv().AuraMode=(v[1]=="Aura Tool") and "tool" or "m1" end })
+
+TabAura:CreateSection("Settings")
+TabAura:CreateInput({ Name="Range", CurrentValue="8", PlaceholderText="1 – 50",
+    RemoveTextAfterFocusLost=false, Flag="ARange",
+    Callback=function(v) local n=tonumber(v); if n then getgenv().AuraRange=math.clamp(n,1,50) end end })
+
+TabAura:CreateToggle({ Name="Enable Aura", CurrentValue=false, Flag="AOn",
+    Callback=function(v) getgenv().AuraOn=v end })
+
+TabAura:CreateSection("Filters")
+
+TabAura:CreateToggle({ Name="Team Check", CurrentValue=false, Flag="ATC",
+    Callback=function(v)
+        getgenv().AuraTeamCheck = v
+        if v and getgenv().AdvAuraTeamCheck_Enabled then
+            getgenv().AdvAuraTeamCheck_Enabled = false
+            pcall(function() Rayfield.Flags.AdvAuraTeam:Set(false) end)
+        end
+    end })
+
+TabAura:CreateToggle({ Name="Skip Friends", CurrentValue=false, Flag="AFC",
+    Callback=function(v) getgenv().AuraFriendOnly=v end })
+
+-- ── ADVANCED TEAM CHECK (AURA) ──────────────────────────────
+TabAura:CreateSection("Advanced Team Check (Aura)")
+
+TabAura:CreateParagraph({ Title="How it works",
+    Content="ON = team được chọn sẽ BỊ DÍNH aura\nOFF = team được chọn KHÔNG bị dính\nKhi bật Advanced, Team Check cũ sẽ tự tắt" })
+
+TabAura:CreateToggle({ Name="Enable Advanced Aura Team Check", CurrentValue=false, Flag="AdvAuraTeam",
+    Callback=function(v)
+        getgenv().AdvAuraTeamCheck_Enabled = v
+        if v and getgenv().AuraTeamCheck then
+            getgenv().AuraTeamCheck = false
+            pcall(function() Rayfield.Flags.ATC:Set(false) end)
+        end
+        if v then refreshTeamList() end
+    end })
+
+local AdvAuraTeamToggles = {}
+local function createAdvAuraTeamToggles()
+    local teamNames = refreshTeamList()
+    for _, name in ipairs(teamNames) do
+        local flagName = "AdvAuraTeam_" .. name:gsub(" ", "_")
+        local defaultVal = getgenv().AdvAuraTeamCheck_Teams[name]
+        if defaultVal == nil then defaultVal = true end
+
+        local tgl = TabAura:CreateToggle({
+            Name = "[AURA] " .. name,
+            CurrentValue = defaultVal,
+            Flag = flagName,
+            Callback = function(val)
+                getgenv().AdvAuraTeamCheck_Teams[name] = val
+            end
+        })
+        table.insert(AdvAuraTeamToggles, tgl)
+    end
+end
+
+task.delay(0.5, createAdvAuraTeamToggles)
+
+-- ── SETTINGS ─────────────────────────────────────────────────
+local TabSettings = Window:CreateTab("Settings", 4483362458)
+
+TabSettings:CreateSection("Performance")
+local PerfLabel = TabSettings:CreateLabel("FPS: --  |  Ping: -- ms")
+local fpsCount  = 0
+local lastFPSTs = tick()
+RunService.RenderStepped:Connect(function()
+    fpsCount = fpsCount + 1
+    if tick() - lastFPSTs >= 1 then
+        local fps = fpsCount; fpsCount = 0; lastFPSTs = tick()
+        local ping = 0
+        pcall(function()
+            ping = math.floor(game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue())
+        end)
+        PerfLabel:Set("FPS: " .. fps .. "  |  Ping: " .. ping .. " ms")
+    end
+end)
+
+-- ============================================================
+-- KEYBIND SYSTEM
+-- ============================================================
+local keybindActions = {}
+local currentKeybinds = {
+    Hitbox = Enum.KeyCode.F,
+    Aura   = Enum.KeyCode.G,
+    GUI    = Enum.KeyCode.Insert,
+}
+
+local function registerKeybind(actionName, newKeyCode, actionFunc)
+    for key, info in pairs(keybindActions) do
+        if info.name == actionName then
+            keybindActions[key] = nil
+            break
+        end
+    end
+    if newKeyCode then
+        keybindActions[newKeyCode] = { name = actionName, func = actionFunc }
+    end
+    currentKeybinds[actionName] = newKeyCode
+end
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local info = keybindActions[input.KeyCode]
+    if info then
+        pcall(info.func)
+    end
+end)
+
+local function parseKeyCode(keyName)
+    if not keyName or keyName == "" then return nil end
+    keyName = tostring(keyName):gsub("%s+", "")
+    local keyMap = {
+        ["Semicolon"] = Enum.KeyCode.Semicolon, [";"] = Enum.KeyCode.Semicolon,
+        ["Comma"] = Enum.KeyCode.Comma, [","] = Enum.KeyCode.Comma,
+        ["Period"] = Enum.KeyCode.Period, ["."] = Enum.KeyCode.Period,
+        ["Slash"] = Enum.KeyCode.Slash, ["/"] = Enum.KeyCode.Slash,
+        ["Quote"] = Enum.KeyCode.Quote, ["\'"] = Enum.KeyCode.Quote,
+        ["BackSlash"] = Enum.KeyCode.BackSlash, ["\\"] = Enum.KeyCode.BackSlash,
+        ["LeftBracket"] = Enum.KeyCode.LeftBracket, ["["] = Enum.KeyCode.LeftBracket,
+        ["RightBracket"] = Enum.KeyCode.RightBracket, ["]"] = Enum.KeyCode.RightBracket,
+        ["Minus"] = Enum.KeyCode.Minus, ["-"] = Enum.KeyCode.Minus,
+        ["Equals"] = Enum.KeyCode.Equals, ["="] = Enum.KeyCode.Equals,
+        ["Grave"] = Enum.KeyCode.Grave, ["`"] = Enum.KeyCode.Grave,
+        ["RightShift"] = Enum.KeyCode.RightShift, ["LeftShift"] = Enum.KeyCode.LeftShift,
+        ["RightControl"] = Enum.KeyCode.RightControl, ["LeftControl"] = Enum.KeyCode.LeftControl,
+        ["RightAlt"] = Enum.KeyCode.RightAlt, ["LeftAlt"] = Enum.KeyCode.LeftAlt,
+        ["Insert"] = Enum.KeyCode.Insert, ["Delete"] = Enum.KeyCode.Delete,
+        ["Home"] = Enum.KeyCode.Home, ["End"] = Enum.KeyCode.End,
+        ["PageUp"] = Enum.KeyCode.PageUp, ["PageDown"] = Enum.KeyCode.PageDown,
+        ["Return"] = Enum.KeyCode.Return, ["Enter"] = Enum.KeyCode.Return,
+        ["Backspace"] = Enum.KeyCode.Backspace, ["Tab"] = Enum.KeyCode.Tab,
+        ["CapsLock"] = Enum.KeyCode.CapsLock, ["Escape"] = Enum.KeyCode.Escape,
+        ["Space"] = Enum.KeyCode.Space,
+        ["Up"] = Enum.KeyCode.Up, ["Down"] = Enum.KeyCode.Down,
+        ["Left"] = Enum.KeyCode.Left, ["Right"] = Enum.KeyCode.Right,
+    }
+    if keyMap[keyName] then return keyMap[keyName] end
+    local ok, result = pcall(function() return Enum.KeyCode[keyName] end)
+    if ok and result then return result end
+    return nil
+end
+
+TabSettings:CreateSection("Keybinds  (click to rebind)")
+
+TabSettings:CreateKeybind({
+    Name = "Toggle Head Hitbox",
+    CurrentKeybind = "F",
+    HoldToInteract = false,
+    Flag = "KB_Hit",
+    CallOnChange = true,
+    Callback = function(newKey)
+        local keyCode = parseKeyCode(newKey)
+        if keyCode then
+            registerKeybind("Hitbox", keyCode, function()
+                setHitbox(not getgenv().HeadHitboxOn)
+            end)
+        end
+    end
+})
+
+TabSettings:CreateKeybind({
+    Name = "Toggle Aura",
+    CurrentKeybind = "G",
+    HoldToInteract = false,
+    Flag = "KB_Aura",
+    CallOnChange = true,
+    Callback = function(newKey)
+        local keyCode = parseKeyCode(newKey)
+        if keyCode then
+            registerKeybind("Aura", keyCode, function()
+                setAura(not getgenv().AuraOn)
+            end)
+        end
+    end
+})
+
+TabSettings:CreateKeybind({
+    Name = "Open / Close GUI",
+    CurrentKeybind = "Insert",
+    HoldToInteract = false,
+    Flag = "KB_GUI",
+    CallOnChange = true,
+    Callback = function(newKey)
+        local keyCode = parseKeyCode(newKey)
+        if keyCode then
+            registerKeybind("GUI", keyCode, function()
+                pcall(function() Rayfield:ToggleUI() end)
+            end)
+        end
+    end
+})
+
+task.delay(1, function()
+    registerKeybind("Hitbox", Enum.KeyCode.F, function()
+        setHitbox(not getgenv().HeadHitboxOn)
+    end)
+    registerKeybind("Aura", Enum.KeyCode.G, function()
+        setAura(not getgenv().AuraOn)
+    end)
+    registerKeybind("GUI", Enum.KeyCode.Insert, function()
+        pcall(function() Rayfield:ToggleUI() end)
+    end)
+end)
+
+TabSettings:CreateSection("Quick Button")
+TabSettings:CreateToggle({ Name="Show Quick Toggle Button", CurrentValue=false, Flag="ShowQuick",
+    Callback=function(v) if QuickGui then QuickGui.Enabled=v end end })
+
+-- ============================================================
+-- QUICK TOGGLE BUTTON
+-- ============================================================
+QuickGui = Instance.new("ScreenGui")
+QuickGui.Name           = "QuickToggle_op1"
+QuickGui.ResetOnSpawn   = false
+QuickGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+QuickGui.Enabled        = false
+QuickGui.Parent         = game.CoreGui
+
+QuickBtn = Instance.new("TextButton")
+QuickBtn.Parent               = QuickGui
+QuickBtn.Size                 = UDim2.new(0, 68, 0, 68)
+QuickBtn.Position             = UDim2.new(1, -78, 1, -86)
+QuickBtn.BackgroundColor3     = Color3.fromRGB(0, 100, 170)
+QuickBtn.BackgroundTransparency = 0.1
+QuickBtn.Text                 = "HEAD\nOFF"
+QuickBtn.TextColor3           = Color3.fromRGB(255, 255, 255)
+QuickBtn.Font                 = Enum.Font.GothamBold
+QuickBtn.TextSize             = 12
+QuickBtn.TextWrapped          = true
+QuickBtn.Active               = true
+QuickBtn.Draggable            = true
+Instance.new("UICorner", QuickBtn).CornerRadius = UDim.new(0.2, 0)
+local qs = Instance.new("UIStroke", QuickBtn)
+qs.Color = Color3.fromRGB(0, 200, 255); qs.Thickness = 2
+
+QuickBtn.MouseButton1Click:Connect(function()
+    setHitbox(not getgenv().HeadHitboxOn)
+end)
+
+task.delay(2, function()
+    Rayfield:Notify({ Title="Aholo oper1", Content="remake by : Aholo | Fixed UI + NPC + Transparency + Square Torso", Duration=4 })
+end)
